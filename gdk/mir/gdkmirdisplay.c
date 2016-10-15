@@ -567,13 +567,126 @@ gdk_mir_display_get_selection_property (GdkDisplay  *display,
 }
 
 static void
+gdk_mir_display_real_convert_selection (GdkDisplay *display,
+                                        GdkWindow  *requestor,
+                                        GdkAtom     selection,
+                                        GdkAtom     target,
+                                        guint32     time)
+{
+  GdkMirDisplay *mir_display = GDK_MIR_DISPLAY (display);
+  const gchar *paste_data;
+  gsize paste_size;
+  const gint *paste_header;
+  GPtrArray *paste_formats;
+  gint i;
+
+  g_return_if_fail (mir_display->paste_data);
+
+  paste_data = g_variant_get_fixed_array (mir_display->paste_data, &paste_size, sizeof (gchar));
+  paste_header = (const gint *) paste_data;
+  paste_formats = g_ptr_array_new_full (paste_header[0], g_free);
+
+  for (i = 0; i < paste_header[0]; i++)
+    g_ptr_array_add (paste_formats, g_strndup (paste_data + paste_header[1 + 4 * i], paste_header[2 + 4 * i]));
+
+  if (target == gdk_atom_intern_static_string ("TARGETS"))
+    {
+    }
+  else if (target == gdk_atom_intern_static_string ("MULTIPLE"))
+    {
+    }
+  else
+    {
+    }
+
+  g_ptr_array_unref (paste_formats);
+}
+
+typedef struct
+{
+  GdkDisplay *display;
+  GdkWindow  *requestor;
+  GdkAtom     selection;
+  GdkAtom     target;
+  guint32     time;
+} ConvertInfo;
+
+static void
+paste_data_ready_cb (GObject      *source_object,
+                     GAsyncResult *res,
+                     gpointer      user_data)
+{
+  ContentHubService *content_service = CONTENT_HUB_SERVICE (source_object);
+  ConvertInfo *info = user_data;
+  GdkMirDisplay *mir_display = GDK_MIR_DISPLAY (info->display);
+  gboolean result;
+
+  g_clear_pointer (&mir_display->paste_data, g_variant_unref);
+
+  result = content_hub_service_call_get_latest_paste_data_finish (content_service,
+                                                                  &mir_display->paste_data,
+                                                                  res,
+                                                                  NULL);
+
+  if (result)
+    gdk_mir_display_real_convert_selection (info->display,
+                                            info->requestor,
+                                            info->selection,
+                                            info->target,
+                                            info->time);
+
+  g_object_unref (info->requestor);
+  g_object_unref (info->display);
+  g_free (info);
+}
+
+static void
 gdk_mir_display_convert_selection (GdkDisplay *display,
                                    GdkWindow  *requestor,
                                    GdkAtom     selection,
                                    GdkAtom     target,
                                    guint32     time)
 {
-  //g_printerr ("gdk_mir_display_convert_selection\n");
+  GdkMirDisplay *mir_display = GDK_MIR_DISPLAY (display);
+  MirSurface *surface;
+  MirPersistentId *persistent_id;
+  ConvertInfo *info;
+
+  if (selection != GDK_SELECTION_CLIPBOARD)
+    return;
+  else if (mir_display->paste_data)
+    gdk_mir_display_real_convert_selection (display, requestor, selection, target, time);
+  else if (mir_display->focused_window)
+    {
+      surface = gdk_mir_window_get_mir_surface (mir_display->focused_window);
+
+      if (!surface)
+        return;
+
+      persistent_id = mir_surface_request_persistent_id_sync (surface);
+
+      if (!persistent_id)
+        return;
+
+      if (mir_persistent_id_is_valid (persistent_id))
+        {
+          info = g_new (ConvertInfo, 1);
+          info->display = g_object_ref (display);
+          info->requestor = g_object_ref (requestor);
+          info->selection = selection;
+          info->target = target;
+          info->time = time;
+
+          content_hub_service_call_get_latest_paste_data (
+            mir_display->content_service,
+            mir_persistent_id_as_string (persistent_id),
+            NULL,
+            paste_data_ready_cb,
+            info);
+        }
+
+      mir_persistent_id_release (persistent_id);
+    }
 }
 
 static gint
